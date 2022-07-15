@@ -1,12 +1,20 @@
 from enum import Enum
 
 from fastapi import FastAPI
+from pydantic import BaseModel
 
 
 class ModelName(str, Enum):
     alexnet = "alexnet"
     resnet = "resnet"
     lenet = "lenet"
+
+
+class Item(BaseModel):
+    name: str
+    description: str | None = None
+    price: float
+    tax: float | None = None
 
 
 app = FastAPI()
@@ -87,6 +95,29 @@ async def read_item_user(item_id: str, needy: str):
     # query parameter라도 기본값을 주지 않으면 required로 지정할 수 있다.
     item = {"item_id": item_id, "needy": needy}
     return item
+
+
+@app.post("/items")
+async def create_item(item: Item):
+    # 필요하다면 body에 있는 타입을 자동으로 변환한다. 변환할 수 없을 경우 에러
+    # swagger에 schema도 자동으로 생성
+    item_dict = item.dict()
+    if item.tax:
+        price_with_tax = item.price + item.tax
+        item_dict.update({"price_with_tax": price_with_tax})
+    return item_dict
+
+
+@app.put("/items/{item_id}")
+async def create_item(item_id: int, item: Item, q: str | None = None):
+    # 1. path에 있는 함수 파라미터는 path param으로 인식
+    # 2. 함수 파라미터의 타입이 singular type(int, float, str, bool ...)이면 query param으로 인식
+    # 3. 함수 파라미터의 타입이 Pydantic model이면 request body로 인식.
+    # Pydantic을 쓰지 않는다면 fastapi에서 제공하는 Body를 사용
+    result = {"item_id": item_id, **item.dict()}
+    if q:
+        result.update({"q": q})
+    return result
 
 
 @app.get("/")
