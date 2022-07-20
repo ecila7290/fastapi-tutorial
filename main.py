@@ -1,6 +1,7 @@
+from email.policy import default
 from enum import Enum
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Query, Path
 from pydantic import BaseModel
 
 
@@ -118,6 +119,31 @@ async def create_item(item_id: int, item: Item, q: str | None = None):
     if q:
         result.update({"q": q})
     return result
+
+
+@app.get("/itemsQVal")
+async def query_items(q: list[str] | None = Query(default=None, alias="item-query")):
+    # Query 함수를 파라미터의 값으로 넣어서 기본값 및 query string에 대한 제약조건을 설정할 수 있다.
+    # default를 없애면 required
+    # query string의 타입을 list로 설정하면 타입검사와 값을 리스트로 변환하는 것도 자동으로 수행한다.
+    # alias 설정 가능해서 query string의 Key가 함수 파라미터 이름과 달라도 이를 인식한다.
+    results = {"items": [{"item_id": "foo"}, {"item_id": "bar"}]}
+    if q:
+        results.update({"q": q})
+    return results
+
+
+@app.get("/itemsPathParam/{item_id}")
+async def foo(
+    q: str, item_id: int = Path(title="The ID of the item to get", gt=0, le=1000), size: float = Query(gt=0, lt=10.5)
+):
+    # path parameter에 대해서는 fastapi에서 제공하는 Path함수를 사용할 수 있다.
+    # 함수에서 파라미터의 순서는 관계 없이 잘 인식한다.
+    # path/query param이 숫자일 때는 Path/Query 함수에 숫자의 범위를 제한할 수도 있다.
+    results = {"item_id": item_id}
+    if q:
+        results.update({"q": q})
+    return results
 
 
 @app.get("/")
