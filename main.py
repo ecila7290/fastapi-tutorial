@@ -2,7 +2,7 @@ from email.policy import default
 from enum import Enum
 
 from fastapi import FastAPI, Query, Path, Body, Cookie, Header
-from pydantic import BaseModel, Field, HttpUrl
+from pydantic import BaseModel, Field, HttpUrl, EmailStr
 
 
 class ModelName(str, Enum):
@@ -21,6 +21,7 @@ class Item(BaseModel):
     description: str | None = Field(default=None, title="The description of the item", max_length=300)
     price: float = Field(gt=0, description="The price must be greater than zero")
     tax: float | None = None
+    tags: list[str] = []
     image: Image | None = None
 
     # schema의 예시를 아래와 같이 넣어줄 수 있다. 이는 apidoc에도 반영된다.
@@ -31,6 +32,7 @@ class Item(BaseModel):
                 "description": "A very nice Item",
                 "price": 35.4,
                 "tax": 3.2,
+                "tags": ["a"],
                 "image": {"url": "https://www.naver.com", "name": "image_name"},
             }
         }
@@ -44,10 +46,47 @@ class Offer(BaseModel):
     items: list[Item]
 
 
+class UserBase(BaseModel):
+    # In/Out을 나누고 추가로 DB에 들어가는 모델까지 더하게 되면 중복된 필드가 많아진다.
+    # 대신 이런 base를 만들고 상속시키는 방식으로 구현하면 중복을 줄일 수 있다.
+    username: str
+    email: EmailStr
+    full_name: str | None = None
+
+
 class User(BaseModel):
     username: str
     full_name: str | None = None
 
+
+class UserIn(UserBase):
+    password: str
+
+
+class UserOut(UserBase):
+    pass
+
+
+class UserInDB(UserBase):
+    hashed_password: str
+
+
+def fake_password_hasher(raw_password: str):
+    return "supersecret" + raw_password
+
+
+def fake_save_user(user_in: UserIn):
+    hashed_password = fake_password_hasher(user_in.password)
+    user_in_db = UserInDB(**user_in.dict(), hashed_password=hashed_password)
+    print("User saved! ..not really")
+    return user_in_db
+
+
+items = {
+    "foo": {"name": "Foo", "price": 50.2},
+    "bar": {"name": "Bar", "description": "The bartenders", "price": 62, "tax": 20.2},
+    "baz": {"name": "Baz", "description": None, "price": 50.2, "tax": 10.5, "tags": []},
+}
 
 app = FastAPI()
 
@@ -75,6 +114,14 @@ async def read_items_headers(
     return {"user_agent": user_agent, "strange_header": strange_header, "x-token values": x_token}
 
 
+@app.get("/items/response/{item_id}", response_model=Item, response_model_exclude_unset=True)
+async def read_item_response(item_id: str):
+    # response_model_exclude_unset 옵션을 통해 실제로 값이 설정되지 않은(=default value가 들어갈) 필드는 제외할 수 있다.
+    # default value와 같은 값이라도 명시적으로 값이 할당되었다면 제외되지 않는다.
+    # 이 외에도 response_model_exclude_defaults나 response_model_exclude_none과 같은 옵션으로 제어할 수도 있다.
+    return items[item_id]
+
+
 @app.get("/items/{item_id}")
 async def read_item(item_id: int, q: str | None = None, short: bool = False):
     # path는 string이나 fastapi에서 알아서 parse해주고 있다.
@@ -87,6 +134,25 @@ async def read_item(item_id: int, q: str | None = None, short: bool = False):
     if not short:
         item.update({"description": "This is an amazing item that has a long description"})
     return item
+
+
+@app.get("/items/{item_id}/name", response_model=Item, response_model_include={"name", "description"})
+async def read_item_name(item_id: str):
+    # response_model용 모델을 새로 작성하는 대신 response_model_include/response_model_exclude로 특정 필드만 포함/제외할수 있다.
+    # 옵션의 값으로 set()이 들어갔지만, list/tuple로 넣어도 알아서 set으로 변환해준다.
+    return items[item_id]
+
+
+@app.get("/items/{item_id}/public", response_model=Item, response_model_exclude={"tax"})
+async def read_item_public_data(item_id: str):
+    return items[item_id]
+
+
+@app.post("/user", response_model=UserOut)
+async def create_user(user: UserIn):
+    # response_model을 지정함으로써 필드 제한 & serialization이 가능하다.
+    user_saved = fake_save_user(user)
+    return user_saved
 
 
 @app.get("/users/{user_id}")
@@ -147,10 +213,11 @@ async def read_item_user(item_id: str, needy: str):
     return item
 
 
-@app.post("/items")
+@app.post("/items", response_model=Item)
 async def create_item(item: Item):
     # 필요하다면 body에 있는 타입을 자동으로 변환한다. 변환할 수 없을 경우 에러
     # swagger에 schema도 자동으로 생성
+    # response_model을 지정함으로써 필드 제한 & serialization이 가능하다.
     item_dict = item.dict()
     if item.tax:
         price_with_tax = item.price + item.tax
