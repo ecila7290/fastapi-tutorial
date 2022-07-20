@@ -1,6 +1,7 @@
+from email.policy import default
 from enum import Enum
 
-from fastapi import FastAPI, Query, Path, Body
+from fastapi import FastAPI, Query, Path, Body, Cookie, Header
 from pydantic import BaseModel, Field, HttpUrl
 
 
@@ -22,10 +23,23 @@ class Item(BaseModel):
     tax: float | None = None
     image: Image | None = None
 
+    # schema의 예시를 아래와 같이 넣어줄 수 있다. 이는 apidoc에도 반영된다.
+    class Config:
+        schema_extra = {
+            "example": {
+                "name": "Foo",
+                "description": "A very nice Item",
+                "price": 35.4,
+                "tax": 3.2,
+                "image": {"url": "https://www.naver.com", "name": "image_name"},
+            }
+        }
+
 
 class Offer(BaseModel):
     name: str
-    description: str | None = None
+    # 각 필드에도 Field함수로 example을 넣을 수 있다.
+    description: str | None = Field(default=None, example="A very nice offer")
     price: float
     items: list[Item]
 
@@ -41,6 +55,24 @@ app = FastAPI()
 @app.get("/")
 async def root():
     return {"message": "hello world"}
+
+
+@app.get("/items/ads")
+async def read_items_ads(ads_id: str | None = Cookie(default=None)):
+    # 쿠키의 값을 가져와서 사용할 수 있다.
+    return {"ads_id": ads_id}
+
+
+@app.get("/items/header")
+async def read_items_headers(
+    user_agent: str | None = Header(default=None),
+    strange_header: str | None = Header(default=None, convert_underscores=False),
+    x_token: list[str] | None = Header(default=None),
+):
+    # 헤더에 있는 값을 가져와 사용할 수 있다.
+    # 헤더는 보통 User-Agent처럼 -을 사용하지만, Header함수에서 이를 snake_case로 변환하여 준다.
+    # 같은 헤더가 여러 값을 갖는 경우 list type으로 명시하면 알아서 이를 인식한다.
+    return {"user_agent": user_agent, "strange_header": strange_header, "x-token values": x_token}
 
 
 @app.get("/items/{item_id}")
