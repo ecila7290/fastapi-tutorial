@@ -1,7 +1,6 @@
-from email.policy import default
 from enum import Enum
 
-from fastapi import FastAPI, Query, Path, Body, Cookie, Header
+from fastapi import FastAPI, Query, Path, Body, Cookie, Header, status, Form
 from pydantic import BaseModel, Field, HttpUrl, EmailStr
 
 
@@ -148,9 +147,11 @@ async def read_item_public_data(item_id: str):
     return items[item_id]
 
 
-@app.post("/user", response_model=UserOut)
+@app.post("/user", response_model=UserOut, status_code=status.HTTP_201_CREATED)
 async def create_user(user: UserIn):
     # response_model을 지정함으로써 필드 제한 & serialization이 가능하다.
+    # 요청에 대한 성공 응답은 기본 200. 이를 status_code 옵션으로 수정할 수 있다.
+    # status code는 fastapi에서 제공하는 status를 사용할 수도 있고 파이썬 내장 모듈인 http.HTTPStatus를 사용할 수도 있다.
     user_saved = fake_save_user(user)
     return user_saved
 
@@ -299,6 +300,12 @@ async def create_index_weights(weights: dict[int, float]):
     # key, value를 모르더라도 type validation은 가능.
     # body에 담긴 json은 string만 key로 받지만, fastapi에서 변환이 가능하다면 지정한 타입대로 변환시킨다.
     return weights
+
+
+@app.post("/login")
+async def login(username: str = Form(), password: str = Form()):
+    # form field가 강제되는 경우 반드시 Form함수를 사용해야 한다.
+    return {"username": username}
 
 
 @app.get("/")
