@@ -1,8 +1,7 @@
-from email.policy import default
 from enum import Enum
 
-from fastapi import FastAPI, Query, Path
-from pydantic import BaseModel
+from fastapi import FastAPI, Query, Path, Body
+from pydantic import BaseModel, Field, HttpUrl
 
 
 class ModelName(str, Enum):
@@ -11,11 +10,29 @@ class ModelName(str, Enum):
     lenet = "lenet"
 
 
+class Image(BaseModel):
+    url: HttpUrl
+    name: str
+
+
 class Item(BaseModel):
+    name: str
+    description: str | None = Field(default=None, title="The description of the item", max_length=300)
+    price: float = Field(gt=0, description="The price must be greater than zero")
+    tax: float | None = None
+    image: Image | None = None
+
+
+class Offer(BaseModel):
     name: str
     description: str | None = None
     price: float
-    tax: float | None = None
+    items: list[Item]
+
+
+class User(BaseModel):
+    username: str
+    full_name: str | None = None
 
 
 app = FastAPI()
@@ -134,7 +151,7 @@ async def query_items(q: list[str] | None = Query(default=None, alias="item-quer
 
 
 @app.get("/itemsPathParam/{item_id}")
-async def foo(
+async def query_items_path(
     q: str, item_id: int = Path(title="The ID of the item to get", gt=0, le=1000), size: float = Query(gt=0, lt=10.5)
 ):
     # path parameter에 대해서는 fastapi에서 제공하는 Path함수를 사용할 수 있다.
@@ -144,6 +161,45 @@ async def foo(
     if q:
         results.update({"q": q})
     return results
+
+
+@app.put("/items/body/{item_id}")
+async def update_item_user(item_id: int, item: Item, user: User, importance: int = Body()):
+    # body parameter가 두개 이상이더라도 구분해서 처리해줄 수 있다.
+    # pydantic의 baseModel을 사용하지 않더라도 Body함수를 파라미터에 지정해주면, 알아서 body로 받아야 하는 것으로 인식한다.
+    results = {"item_id": item_id, "item": item, "user": user, "importance": importance}
+    return results
+
+
+@app.put("/items/field/{item_id}")
+async def update_item_field(item_id: int, item: Item):
+    # 함수의 파라미터에 Query, Body등을 사용하는 대신 Field 함수를 baseModel안에서 사용함으로써
+    # validation이나 metadata를 추가할 수 있다.
+    results = {"item_id": item_id, "item": item}
+    return results
+
+
+@app.put("/items/nested/{item_id}")
+async def update_item_nested(item_id: int, item: Item):
+    # nest model의 경우에도 sub model의 type valdation & data conversion을 지원한다.
+    # 기존에 파이썬에서 제공하는 type뿐만 아니라 HttpUrl과 같은, pydantic에서 제공하는 타입도 사용할 수 있다.
+    results = {"item_id": item_id, "item": item}
+    return results
+
+
+@app.post("/offers")
+async def create_offer(offer: Offer):
+    # 깊이 nested된 모델이라도 문제 없이 인식한다.
+    for item in offer.items:
+        item.image.url
+    return offer
+
+
+@app.post("/index-wieghts")
+async def create_index_weights(weights: dict[int, float]):
+    # key, value를 모르더라도 type validation은 가능.
+    # body에 담긴 json은 string만 key로 받지만, fastapi에서 변환이 가능하다면 지정한 타입대로 변환시킨다.
+    return weights
 
 
 @app.get("/")
