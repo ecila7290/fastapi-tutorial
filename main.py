@@ -1,6 +1,9 @@
+import datetime
 from enum import Enum
 
-from fastapi import FastAPI, Query, Path, Body, Cookie, Header, status, Form
+from fastapi import FastAPI, Query, Path, Body, Cookie, Header, Request, status, Form, HTTPException
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, HttpUrl, EmailStr
 
 
@@ -22,6 +25,7 @@ class Item(BaseModel):
     tax: float | None = None
     tags: list[str] = []
     image: Image | None = None
+    timestamp: datetime.datetime
 
     # schema의 예시를 아래와 같이 넣어줄 수 있다. 이는 apidoc에도 반영된다.
     class Config:
@@ -33,6 +37,7 @@ class Item(BaseModel):
                 "tax": 3.2,
                 "tags": ["a"],
                 "image": {"url": "https://www.naver.com", "name": "image_name"},
+                "timestamp": datetime.datetime.now(),
             }
         }
 
@@ -70,6 +75,8 @@ class UserInDB(UserBase):
     hashed_password: str
 
 
+fake_db = {}
+
 def fake_password_hasher(raw_password: str):
     return "supersecret" + raw_password
 
@@ -94,14 +101,15 @@ app = FastAPI()
 async def root():
     return {"message": "hello world"}
 
-
-@app.get("/items/ads")
+# tag를 달면 swagger에서 알아서 태그별로 묶어서 보여준다.
+# tag를 Enum으로 만들면 하드코드된 태그 대신 코드로 만들 수 있다.
+@app.get("/items/ads", tags=["items"])
 async def read_items_ads(ads_id: str | None = Cookie(default=None)):
     # 쿠키의 값을 가져와서 사용할 수 있다.
     return {"ads_id": ads_id}
 
 
-@app.get("/items/header")
+@app.get("/items/header", tags=["items"])
 async def read_items_headers(
     user_agent: str | None = Header(default=None),
     strange_header: str | None = Header(default=None, convert_underscores=False),
@@ -113,7 +121,7 @@ async def read_items_headers(
     return {"user_agent": user_agent, "strange_header": strange_header, "x-token values": x_token}
 
 
-@app.get("/items/response/{item_id}", response_model=Item, response_model_exclude_unset=True)
+@app.get("/items/response/{item_id}", response_model=Item, response_model_exclude_unset=True, tags=["items"])
 async def read_item_response(item_id: str):
     # response_model_exclude_unset 옵션을 통해 실제로 값이 설정되지 않은(=default value가 들어갈) 필드는 제외할 수 있다.
     # default value와 같은 값이라도 명시적으로 값이 할당되었다면 제외되지 않는다.
@@ -121,7 +129,7 @@ async def read_item_response(item_id: str):
     return items[item_id]
 
 
-@app.get("/items/{item_id}")
+@app.get("/items/{item_id}", tags=["items"])
 async def read_item(item_id: int, q: str | None = None, short: bool = False):
     # path는 string이나 fastapi에서 알아서 parse해주고 있다.
     # query parameter(q)를 알아서 인식해준다.
@@ -132,22 +140,25 @@ async def read_item(item_id: int, q: str | None = None, short: bool = False):
         return {"item_id": item_id, "q": q}
     if not short:
         item.update({"description": "This is an amazing item that has a long description"})
+    if not item_id in item:
+        # detail에는 string뿐만 아니라 list, dict 타입도 알아서 JSON으로 변환시켜준다.
+        raise HTTPException(status_code=404, detail='Item not found')
     return item
 
 
-@app.get("/items/{item_id}/name", response_model=Item, response_model_include={"name", "description"})
+@app.get("/items/{item_id}/name", response_model=Item, response_model_include={"name", "description"}, tags=["items"])
 async def read_item_name(item_id: str):
     # response_model용 모델을 새로 작성하는 대신 response_model_include/response_model_exclude로 특정 필드만 포함/제외할수 있다.
     # 옵션의 값으로 set()이 들어갔지만, list/tuple로 넣어도 알아서 set으로 변환해준다.
     return items[item_id]
 
 
-@app.get("/items/{item_id}/public", response_model=Item, response_model_exclude={"tax"})
+@app.get("/items/{item_id}/public", response_model=Item, response_model_exclude={"tax"}, tags=["items"])
 async def read_item_public_data(item_id: str):
     return items[item_id]
 
 
-@app.post("/user", response_model=UserOut, status_code=status.HTTP_201_CREATED)
+@app.post("/user", response_model=UserOut, status_code=status.HTTP_201_CREATED, tags=["users"])
 async def create_user(user: UserIn):
     # response_model을 지정함으로써 필드 제한 & serialization이 가능하다.
     # 요청에 대한 성공 응답은 기본 200. 이를 status_code 옵션으로 수정할 수 있다.
@@ -156,12 +167,12 @@ async def create_user(user: UserIn):
     return user_saved
 
 
-@app.get("/users/{user_id}")
+@app.get("/users/{user_id}", tags=["users"])
 async def read_user(user_id: str):
     return {"user_id": user_id}
 
 
-@app.get("/users/me")
+@app.get("/users/me", tags=["users"])
 async def read_user_me():
     # 이 path는 호출될 수 없다. 위의 API에서 user_id: str로 이미 me를 받고 있기 때문.
     # 따라서 고정 path를 변수가 있는 path보다 항상 먼저 오게 해야 한다.
@@ -190,13 +201,13 @@ async def read_file(file_path: str):
 fake_items_db = [{"item_name": "Foo"}, {"item_name": "Bar"}, {"item_name": "Baz"}]
 
 
-@app.get("/items")
+@app.get("/items", tags=["items"])
 async def query_item(skip: int = 0, limit: int = 10):
     # path parameter와 마찬가지로 함수 파라미터에서 타입을 지정해준대로 동작.(str->int)
     return fake_items_db[skip : skip + limit]
 
 
-@app.get("/users/{user_id}/items/{item_id}")
+@app.get("/users/{user_id}/items/{item_id}", tags=["users"])
 async def read_user_item(user_id: int, item_id: str, q: str | None = None, short: bool = False):
     # 매개변수 순서 상관 없음
     item = {"item_id": item_id, "owner_id": user_id}
@@ -207,15 +218,25 @@ async def read_user_item(user_id: int, item_id: str, q: str | None = None, short
     return item
 
 
-@app.get("/items/{item_id}/user")
+@app.get("/items/{item_id}/user", tags=["items"])
 async def read_item_user(item_id: str, needy: str):
     # query parameter라도 기본값을 주지 않으면 required로 지정할 수 있다.
     item = {"item_id": item_id, "needy": needy}
     return item
 
 
-@app.post("/items", response_model=Item)
+@app.post("/items", response_model=Item, tags=["items"], response_description="The created item")
 async def create_item(item: Item):
+    # docstring 생성이 가능하며 markdown도 지원한다.
+    """
+    Create an item with all the information:
+
+    - **name**: each item must have a name
+    - **description**: a long description
+    - **price**: required
+    - **tax**: if the item doesn't have tax, you can omit this
+    - **tags**: a set of unique tag strings for this item
+    """
     # 필요하다면 body에 있는 타입을 자동으로 변환한다. 변환할 수 없을 경우 에러
     # swagger에 schema도 자동으로 생성
     # response_model을 지정함으로써 필드 제한 & serialization이 가능하다.
@@ -226,19 +247,23 @@ async def create_item(item: Item):
     return item_dict
 
 
-@app.put("/items/{item_id}")
-async def create_item(item_id: int, item: Item, q: str | None = None):
+@app.put("/items/{item_id}", tags=["items"])
+async def update_item(item_id: int, item: Item, q: str | None = None):
     # 1. path에 있는 함수 파라미터는 path param으로 인식
     # 2. 함수 파라미터의 타입이 singular type(int, float, str, bool ...)이면 query param으로 인식
     # 3. 함수 파라미터의 타입이 Pydantic model이면 request body로 인식.
     # Pydantic을 쓰지 않는다면 fastapi에서 제공하는 Body를 사용
     result = {"item_id": item_id, **item.dict()}
+    # datetime처럼 JSON 변환시 에러가 발생하는 것들도 jsonable_encoder를 통해 적절하게 변환해줄 수 있다.
+    # 또한 해당 함수의 결과는 string이 아닌 dict 형태로 나오게 된다.
+    json_compatible_item_data = jsonable_encoder(item)
+    fake_db[item_id] = json_compatible_item_data
     if q:
         result.update({"q": q})
     return result
 
 
-@app.get("/itemsQVal")
+@app.get("/itemsQVal", tags=["items"])
 async def query_items(q: list[str] | None = Query(default=None, alias="item-query")):
     # Query 함수를 파라미터의 값으로 넣어서 기본값 및 query string에 대한 제약조건을 설정할 수 있다.
     # default를 없애면 required
@@ -250,7 +275,7 @@ async def query_items(q: list[str] | None = Query(default=None, alias="item-quer
     return results
 
 
-@app.get("/itemsPathParam/{item_id}")
+@app.get("/itemsPathParam/{item_id}", tags=["items"])
 async def query_items_path(
     q: str, item_id: int = Path(title="The ID of the item to get", gt=0, le=1000), size: float = Query(gt=0, lt=10.5)
 ):
@@ -263,7 +288,7 @@ async def query_items_path(
     return results
 
 
-@app.put("/items/body/{item_id}")
+@app.put("/items/body/{item_id}", tags=["items"])
 async def update_item_user(item_id: int, item: Item, user: User, importance: int = Body()):
     # body parameter가 두개 이상이더라도 구분해서 처리해줄 수 있다.
     # pydantic의 baseModel을 사용하지 않더라도 Body함수를 파라미터에 지정해주면, 알아서 body로 받아야 하는 것으로 인식한다.
@@ -271,7 +296,7 @@ async def update_item_user(item_id: int, item: Item, user: User, importance: int
     return results
 
 
-@app.put("/items/field/{item_id}")
+@app.put("/items/field/{item_id}", tags=["items"])
 async def update_item_field(item_id: int, item: Item):
     # 함수의 파라미터에 Query, Body등을 사용하는 대신 Field 함수를 baseModel안에서 사용함으로써
     # validation이나 metadata를 추가할 수 있다.
@@ -279,7 +304,7 @@ async def update_item_field(item_id: int, item: Item):
     return results
 
 
-@app.put("/items/nested/{item_id}")
+@app.put("/items/nested/{item_id}", tags=["items"])
 async def update_item_nested(item_id: int, item: Item):
     # nest model의 경우에도 sub model의 type valdation & data conversion을 지원한다.
     # 기존에 파이썬에서 제공하는 type뿐만 아니라 HttpUrl과 같은, pydantic에서 제공하는 타입도 사용할 수 있다.
@@ -302,11 +327,26 @@ async def create_index_weights(weights: dict[int, float]):
     return weights
 
 
-@app.post("/login")
+@app.post("/login", tags=["users"])
 async def login(username: str = Form(), password: str = Form()):
     # form field가 강제되는 경우 반드시 Form함수를 사용해야 한다.
     return {"username": username}
 
+
+class UnicornException(Exception):
+    def __init__(self, name:str) -> None:
+        self.name=name
+
+@app.exception_handler(UnicornException)
+async def unicorn_exception_handler(request: Request, exc: UnicornException):
+    # exception_handler 데코레이터를 통해 exception이 발생했을 떄 어떻게 handling할지 custom이 가능
+    return JSONResponse(status_code=418, content={'message':f'Oops! {exc.name} did something. There goes a rainbow...'})
+
+@app.get("/unicorns/{name}")
+async def read_unicorn(name:str):
+    if name == 'yolo':
+        raise UnicornException(name=name)
+    return {'unicorn_name':name}
 
 @app.get("/")
 async def foo():
