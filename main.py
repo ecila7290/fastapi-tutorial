@@ -1,7 +1,7 @@
 import datetime
 from enum import Enum
 
-from fastapi import FastAPI, Query, Path, Body, Cookie, Header, Request, status, Form, HTTPException
+from fastapi import FastAPI, Query, Path, Body, Cookie, Header, Request, status, Form, HTTPException, Depends
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, HttpUrl, EmailStr
@@ -74,6 +74,38 @@ class UserOut(UserBase):
 class UserInDB(UserBase):
     hashed_password: str
 
+async def common_parameters(q: str|None=None, skip:int=0, limit:int=100):
+    # dependency 함수를 설정하고 Depends를 통해 호출하면 의존성이 주입된다.
+    # 동기 함수에 async dependency 함수를 주입할 수도 있고, 비동기 함수에 sync dependency 함수를 주입할 수도 있다.
+    return {'q':q, 'skip':skip, 'limit':limit}
+
+class CommonQueryParams:
+    # dependency가 될 수 있는 것은 함수뿐만 아니라 모든 Callable이므로 클래스도 가능하다.
+    # 위의 함수처럼 dict를 리턴하는 경우, 자동완성이 미흡할 수밖에 없어 클래스로 만드는 것이 편할 수 있다.
+    def __init__(self, q:str|None=None, skip:int=0,limit:int=100) -> None:
+        self.q = q
+        self.skip=skip
+        self.limit=limit
+
+def query_extractor(q:str|None=None):
+    return q
+
+def query_or_cookie_extractor(q:str=Depends(query_extractor), last_query:str|None=Cookie(default=None)):
+    # dependency는 nested된 형태로도 사용이 가능하다.
+    # 같은 dependency를 여러번 사용하는 경우 캐싱 처리를 해서 한 번만 호출되지만
+    # 캐싱된 값을 사용하지 않고 매번 호출해야 하는 경우에는 use_cache=False 옵션을 준다.
+    if not q:
+        return last_query
+    return q
+
+async def verify_token(x_token:str=Header()):
+    if x_token != "fake-super-secret-token":
+        raise HTTPException(status_code=400, detail="X-Token header invalid")
+
+async def verify_key(x_key: str = Header()):
+    if x_key != "fake-super-secret-key":
+        raise HTTPException(status_code=400, detail="X-Key header invalid")
+    return x_key
 
 fake_db = {}
 
@@ -157,6 +189,26 @@ async def read_item_name(item_id: str):
 async def read_item_public_data(item_id: str):
     return items[item_id]
 
+@app.get('/itemsQuery', tags=["items"])
+async def query_items(commons:dict= Depends(common_parameters)):
+    return commons
+
+@app.get('/itemsQueryClass', tags=["items"])
+async def query_items_with_class_param(commons: CommonQueryParams=Depends(CommonQueryParams)):
+    # dependency가 파라미터 타입인 클래스를 호출하는 경우에는 Depends()만으로 의존성을 주입할 수 있다.
+    # 예) commons: CommonQueryParams=Depends()
+    response = {}
+    if commons.q:
+        response.update({'q':commons.q})
+    items=fake_items_db[commons.skip : commons.skip + commons.limit]
+    response.update({'items':items})
+    return response
+
+@app.get('/itemsQueryWithDecorator', dependencies=[Depends(verify_token), Depends(verify_key)], tags=["items"])
+async def query_items_with_decorator():
+    # 위와 같은 dependency는 path에 놓아도 사용하지 않으므로 삭제하게 될 우려가 있다.
+    # 이처럼 값을 돌려줄 필요가 없는 경우에는 decorator의 dependencies에서 처리하도록 한다.
+    return [{'item':'foo'},{'item':'bar'}]
 
 @app.post("/user", response_model=UserOut, status_code=status.HTTP_201_CREATED, tags=["users"])
 async def create_user(user: UserIn):
@@ -165,6 +217,10 @@ async def create_user(user: UserIn):
     # status code는 fastapi에서 제공하는 status를 사용할 수도 있고 파이썬 내장 모듈인 http.HTTPStatus를 사용할 수도 있다.
     user_saved = fake_save_user(user)
     return user_saved
+
+app.get('/usersQuery', tags=["users"])
+async def query_users(commons:dict= Depends(common_parameters)):
+    return commons
 
 
 @app.get("/users/{user_id}", tags=["users"])
@@ -248,7 +304,7 @@ async def create_item(item: Item):
 
 
 @app.put("/items/{item_id}", tags=["items"])
-async def update_item(item_id: int, item: Item, q: str | None = None):
+async def update_item(item_id: str, item: Item, q: str | None = None):
     # 1. path에 있는 함수 파라미터는 path param으로 인식
     # 2. 함수 파라미터의 타입이 singular type(int, float, str, bool ...)이면 query param으로 인식
     # 3. 함수 파라미터의 타입이 Pydantic model이면 request body로 인식.
@@ -261,6 +317,18 @@ async def update_item(item_id: int, item: Item, q: str | None = None):
     if q:
         result.update({"q": q})
     return result
+
+@app.patch('/itemsPatch/{item_id}', tags=['items'])
+async def patch_item(item_id:str, item:Item):
+    # exclude_unset을 통해 값이 안들어간(default value인) 필드는 제외함으로써 부분 업데이트를 구현할 수 있다.
+    # 기존 데이터를 copy하고 파라미터에 update을 줌으로써 데이터 업데이트가 가능하다.
+    stored_item_data = items[item_id]
+    stored_item_model = Item(**stored_item_data)
+    update_data = item.dict(exclude_unset=True)
+    updated_item = stored_item_model.copy(update=update_data)
+    items[item_id] = jsonable_encoder(updated_item)
+    return updated_item
+
 
 
 @app.get("/itemsQVal", tags=["items"])
