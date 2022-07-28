@@ -4,6 +4,7 @@ from enum import Enum
 from fastapi import FastAPI, Query, Path, Body, Cookie, Header, Request, status, Form, HTTPException, Depends
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from pydantic import BaseModel, Field, HttpUrl, EmailStr
 
 
@@ -60,7 +61,9 @@ class UserBase(BaseModel):
 
 class User(BaseModel):
     username: str
+    email: str | None = None
     full_name: str | None = None
+    disabled: bool | None = None
 
 
 class UserIn(UserBase):
@@ -74,23 +77,27 @@ class UserOut(UserBase):
 class UserInDB(UserBase):
     hashed_password: str
 
-async def common_parameters(q: str|None=None, skip:int=0, limit:int=100):
+
+async def common_parameters(q: str | None = None, skip: int = 0, limit: int = 100):
     # dependency 함수를 설정하고 Depends를 통해 호출하면 의존성이 주입된다.
     # 동기 함수에 async dependency 함수를 주입할 수도 있고, 비동기 함수에 sync dependency 함수를 주입할 수도 있다.
-    return {'q':q, 'skip':skip, 'limit':limit}
+    return {"q": q, "skip": skip, "limit": limit}
+
 
 class CommonQueryParams:
     # dependency가 될 수 있는 것은 함수뿐만 아니라 모든 Callable이므로 클래스도 가능하다.
     # 위의 함수처럼 dict를 리턴하는 경우, 자동완성이 미흡할 수밖에 없어 클래스로 만드는 것이 편할 수 있다.
-    def __init__(self, q:str|None=None, skip:int=0,limit:int=100) -> None:
+    def __init__(self, q: str | None = None, skip: int = 0, limit: int = 100) -> None:
         self.q = q
-        self.skip=skip
-        self.limit=limit
+        self.skip = skip
+        self.limit = limit
 
-def query_extractor(q:str|None=None):
+
+def query_extractor(q: str | None = None):
     return q
 
-def query_or_cookie_extractor(q:str=Depends(query_extractor), last_query:str|None=Cookie(default=None)):
+
+def query_or_cookie_extractor(q: str = Depends(query_extractor), last_query: str | None = Cookie(default=None)):
     # dependency는 nested된 형태로도 사용이 가능하다.
     # 같은 dependency를 여러번 사용하는 경우 캐싱 처리를 해서 한 번만 호출되지만
     # 캐싱된 값을 사용하지 않고 매번 호출해야 하는 경우에는 use_cache=False 옵션을 준다.
@@ -98,16 +105,37 @@ def query_or_cookie_extractor(q:str=Depends(query_extractor), last_query:str|Non
         return last_query
     return q
 
-async def verify_token(x_token:str=Header()):
+
+async def verify_token(x_token: str = Header()):
     if x_token != "fake-super-secret-token":
         raise HTTPException(status_code=400, detail="X-Token header invalid")
+
 
 async def verify_key(x_key: str = Header()):
     if x_key != "fake-super-secret-key":
         raise HTTPException(status_code=400, detail="X-Key header invalid")
     return x_key
 
+
 fake_db = {}
+
+fake_users_db = {
+    "johndoe": {
+        "username": "johndoe",
+        "full_name": "John Doe",
+        "email": "johndoe@example.com",
+        "hashed_password": "fakehashedsecret",
+        "disabled": False,
+    },
+    "alice": {
+        "username": "alice",
+        "full_name": "Alice Wonderson",
+        "email": "alice@example.com",
+        "hashed_password": "fakehashedsecret2",
+        "disabled": True,
+    },
+}
+
 
 def fake_password_hasher(raw_password: str):
     return "supersecret" + raw_password
@@ -128,10 +156,54 @@ items = {
 
 app = FastAPI()
 
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+
+
+def fake_decode_token(token):
+    return User(username=token + "fakedecoded", email="john@example.com", full_name="John Doe")
+
+
+async def get_current_user(token: str = Depends(oauth2_scheme)):
+    user = fake_decode_token(token)
+    return user
+
+
+def fake_hash_password(password: str):
+    return "fakehashed" + password
+
+
+def get_user(db, username: str):
+    if username in db:
+        user_dict = db[username]
+        return UserInDB(**user_dict)
+
+
+def fake_decode_token2(token):
+    user = get_user(fake_users_db, token)
+    return user
+
+
+async def get_current_user2(token: str = Depends(oauth2_scheme)):
+    user = fake_decode_token2(token)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid authentication credentials",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return user
+
+
+async def get_current_active_user(current_user: User = Depends(get_current_user2)):
+    if current_user.disabled:
+        raise HTTPException(status_code=400, detail="Inactive user")
+    return current_user
+
 
 @app.get("/")
 async def root():
     return {"message": "hello world"}
+
 
 # tag를 달면 swagger에서 알아서 태그별로 묶어서 보여준다.
 # tag를 Enum으로 만들면 하드코드된 태그 대신 코드로 만들 수 있다.
@@ -174,7 +246,7 @@ async def read_item(item_id: int, q: str | None = None, short: bool = False):
         item.update({"description": "This is an amazing item that has a long description"})
     if not item_id in item:
         # detail에는 string뿐만 아니라 list, dict 타입도 알아서 JSON으로 변환시켜준다.
-        raise HTTPException(status_code=404, detail='Item not found')
+        raise HTTPException(status_code=404, detail="Item not found")
     return item
 
 
@@ -189,26 +261,35 @@ async def read_item_name(item_id: str):
 async def read_item_public_data(item_id: str):
     return items[item_id]
 
-@app.get('/itemsQuery', tags=["items"])
-async def query_items(commons:dict= Depends(common_parameters)):
+
+@app.get("/itemsQuery", tags=["items"])
+async def query_items(commons: dict = Depends(common_parameters)):
     return commons
 
-@app.get('/itemsQueryClass', tags=["items"])
-async def query_items_with_class_param(commons: CommonQueryParams=Depends(CommonQueryParams)):
+
+@app.get("/itemsQueryClass", tags=["items"])
+async def query_items_with_class_param(commons: CommonQueryParams = Depends(CommonQueryParams)):
     # dependency가 파라미터 타입인 클래스를 호출하는 경우에는 Depends()만으로 의존성을 주입할 수 있다.
     # 예) commons: CommonQueryParams=Depends()
     response = {}
     if commons.q:
-        response.update({'q':commons.q})
-    items=fake_items_db[commons.skip : commons.skip + commons.limit]
-    response.update({'items':items})
+        response.update({"q": commons.q})
+    items = fake_items_db[commons.skip : commons.skip + commons.limit]
+    response.update({"items": items})
     return response
 
-@app.get('/itemsQueryWithDecorator', dependencies=[Depends(verify_token), Depends(verify_key)], tags=["items"])
+
+@app.get("/itemsQueryWithDecorator", dependencies=[Depends(verify_token), Depends(verify_key)], tags=["items"])
 async def query_items_with_decorator():
     # 위와 같은 dependency는 path에 놓아도 사용하지 않으므로 삭제하게 될 우려가 있다.
     # 이처럼 값을 돌려줄 필요가 없는 경우에는 decorator의 dependencies에서 처리하도록 한다.
-    return [{'item':'foo'},{'item':'bar'}]
+    return [{"item": "foo"}, {"item": "bar"}]
+
+
+@app.get("/itemsOauth2", tags=["items"])
+async def read_items_with_oauth2(token: str = Depends(oauth2_scheme)):
+    return {"token": token}
+
 
 @app.post("/user", response_model=UserOut, status_code=status.HTTP_201_CREATED, tags=["users"])
 async def create_user(user: UserIn):
@@ -218,8 +299,9 @@ async def create_user(user: UserIn):
     user_saved = fake_save_user(user)
     return user_saved
 
-app.get('/usersQuery', tags=["users"])
-async def query_users(commons:dict= Depends(common_parameters)):
+
+@app.get("/usersQuery", tags=["users"])
+async def query_users(commons: dict = Depends(common_parameters)):
     return commons
 
 
@@ -233,6 +315,11 @@ async def read_user_me():
     # 이 path는 호출될 수 없다. 위의 API에서 user_id: str로 이미 me를 받고 있기 때문.
     # 따라서 고정 path를 변수가 있는 path보다 항상 먼저 오게 해야 한다.
     return {"user_id": "the current user"}
+
+
+@app.get("usersOauth2/me")
+async def read_users_me(current_user: User = Depends(get_current_active_user)):
+    return current_user
 
 
 @app.get("/models/{model_name}")
@@ -318,8 +405,9 @@ async def update_item(item_id: str, item: Item, q: str | None = None):
         result.update({"q": q})
     return result
 
-@app.patch('/itemsPatch/{item_id}', tags=['items'])
-async def patch_item(item_id:str, item:Item):
+
+@app.patch("/itemsPatch/{item_id}", tags=["items"])
+async def patch_item(item_id: str, item: Item):
     # exclude_unset을 통해 값이 안들어간(default value인) 필드는 제외함으로써 부분 업데이트를 구현할 수 있다.
     # 기존 데이터를 copy하고 파라미터에 update을 줌으로써 데이터 업데이트가 가능하다.
     stored_item_data = items[item_id]
@@ -328,7 +416,6 @@ async def patch_item(item_id:str, item:Item):
     updated_item = stored_item_model.copy(update=update_data)
     items[item_id] = jsonable_encoder(updated_item)
     return updated_item
-
 
 
 @app.get("/itemsQVal", tags=["items"])
@@ -401,20 +488,35 @@ async def login(username: str = Form(), password: str = Form()):
     return {"username": username}
 
 
+@app.post("/token", tags=["users"])
+async def login_oauth(form_data: OAuth2PasswordRequestForm = Depends()):
+    user_dict = fake_users_db.get(form_data.username)
+    if not user_dict:
+        raise HTTPException(status_code=400, detail="Incorrect username or password")
+    user = UserInDB(**user_dict)
+    hashed_password = fake_hash_password(form_data.password)
+    if not hashed_password == user.hashed_password:
+        raise HTTPException(status_code=400, detail="Incorrect username or password")
+    return {"access_token": user.username, "token_type": "bearer"}
+
+
 class UnicornException(Exception):
-    def __init__(self, name:str) -> None:
-        self.name=name
+    def __init__(self, name: str) -> None:
+        self.name = name
+
 
 @app.exception_handler(UnicornException)
 async def unicorn_exception_handler(request: Request, exc: UnicornException):
     # exception_handler 데코레이터를 통해 exception이 발생했을 떄 어떻게 handling할지 custom이 가능
-    return JSONResponse(status_code=418, content={'message':f'Oops! {exc.name} did something. There goes a rainbow...'})
+    return JSONResponse(status_code=418, content={"message": f"Oops! {exc.name} did something. There goes a rainbow..."})
+
 
 @app.get("/unicorns/{name}")
-async def read_unicorn(name:str):
-    if name == 'yolo':
+async def read_unicorn(name: str):
+    if name == "yolo":
         raise UnicornException(name=name)
-    return {'unicorn_name':name}
+    return {"unicorn_name": name}
+
 
 @app.get("/")
 async def foo():
