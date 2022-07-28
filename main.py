@@ -5,8 +5,15 @@ from fastapi import FastAPI, Query, Path, Body, Cookie, Header, Request, status,
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from jose import JWTError, jwt
 from pydantic import BaseModel, Field, HttpUrl, EmailStr
+from passlib.context import CryptContext
 
+# to get a string like this run:
+# openssl rand -hex 32
+SECRET_KEY = "45e69d166863c63c834656551596b21e148a8705657bbca35ed6d8de4a4d809c"
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
 class ModelName(str, Enum):
     alexnet = "alexnet"
@@ -76,6 +83,7 @@ class UserOut(UserBase):
 
 class UserInDB(UserBase):
     hashed_password: str
+    disabled: bool | None = None
 
 
 async def common_parameters(q: str | None = None, skip: int = 0, limit: int = 100):
@@ -119,12 +127,19 @@ async def verify_key(x_key: str = Header()):
 
 fake_db = {}
 
+class Token(BaseModel):
+    access_token:str
+    token_type:str
+
+class TokenData(BaseModel):
+    username:str|None=None
+
 fake_users_db = {
     "johndoe": {
         "username": "johndoe",
         "full_name": "John Doe",
         "email": "johndoe@example.com",
-        "hashed_password": "fakehashedsecret",
+        "hashed_password": "$2b$12$EixZaYVK1fsbw1ZfbX3OXePaWxn96p36WQoeG6Lruj3vjPGga31lW",
         "disabled": False,
     },
     "alice": {
@@ -156,8 +171,19 @@ items = {
 
 app = FastAPI()
 
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+pwd_context = CryptContext(schemes=['bcrypt'], deprecated="auto")
 
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+# 전역에 dependency를 주입할 경우에는 app에서 처리해준다.
+# 예) app = FastAPI(dependencies=[Depends(verify_token), Depends(verify_key)])
+
+oauth2_jwt_scheme = OAuth2PasswordBearer(tokenUrl="token_access")
+
+def verify_password(plain_password, hashed_password):
+    return pwd_context.verify(plain_password, hashed_password)
+
+def get_password_hash(password):
+    return pwd_context.hash(password)
 
 def fake_decode_token(token):
     return User(username=token + "fakedecoded", email="john@example.com", full_name="John Doe")
@@ -193,11 +219,53 @@ async def get_current_user2(token: str = Depends(oauth2_scheme)):
         )
     return user
 
+async def get_current_user_with_jwt(token:str = Depends(oauth2_jwt_scheme)):
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username:str = payload.get('sub')
+        if username is None:
+            raise credentials_exception
+        token_data = TokenData(username=username)
+    except JWTError:
+        raise credentials_exception
+    user = get_user(fake_users_db, username=token_data.username)
+    if user is None:
+        raise credentials_exception
+    return user
+
+async def get_current_active_user_with_jwt(current_user: User = Depends(get_current_user_with_jwt)):
+    if current_user.disabled:
+        raise HTTPException(status_code=400, detail="Inactive user")
+    return current_user
+
 
 async def get_current_active_user(current_user: User = Depends(get_current_user2)):
     if current_user.disabled:
         raise HTTPException(status_code=400, detail="Inactive user")
     return current_user
+
+def authenticate_user(fake_db, username:str, password:str):
+    user = get_user(fake_db, username)
+    if not user:
+        return False
+    if not verify_password(password, user.hashed_password):
+        return False
+    return user
+
+def create_access_token(data:dict, expires_delta:datetime.timedelta|None=None):
+    to_encode = data.copy()
+    if expires_delta:
+        expire = datetime.datetime.utcnow() + expires_delta
+    else:
+        expire = datetime.datetime.utcnow() + datetime.timedelta(minutes=15)
+    to_encode.update({'exp': expire})
+    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, ALGORITHM)
+    return encoded_jwt
 
 
 @app.get("/")
@@ -317,10 +385,13 @@ async def read_user_me():
     return {"user_id": "the current user"}
 
 
-@app.get("usersOauth2/me")
+@app.get("/usersOauth2/me", tags=["users"])
 async def read_users_me(current_user: User = Depends(get_current_active_user)):
     return current_user
 
+@app.get('/usersJwt/me', tags=["users"])
+async def read_users_jwt_me(current_user: User = Depends(get_current_active_user_with_jwt)):
+    return current_user
 
 @app.get("/models/{model_name}")
 async def get_mode(model_name: ModelName):
@@ -498,6 +569,19 @@ async def login_oauth(form_data: OAuth2PasswordRequestForm = Depends()):
     if not hashed_password == user.hashed_password:
         raise HTTPException(status_code=400, detail="Incorrect username or password")
     return {"access_token": user.username, "token_type": "bearer"}
+
+@app.post('/token_access', response_model=Token)
+async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends()):
+    user = authenticate_user(fake_users_db, form_data.username, form_data.password)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect username or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    access_token_exprires = datetime.timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(data={'sub': user.username}, expires_delta=access_token_exprires)
+    return {'access_token': access_token, 'token_type': 'bearer'}
 
 
 class UnicornException(Exception):
