@@ -1,8 +1,10 @@
+import time
 import datetime
 from enum import Enum
 
 from fastapi import FastAPI, Query, Path, Body, Cookie, Header, Request, status, Form, HTTPException, Depends
 from fastapi.encoders import jsonable_encoder
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from jose import JWTError, jwt
@@ -14,6 +16,7 @@ from passlib.context import CryptContext
 SECRET_KEY = "45e69d166863c63c834656551596b21e148a8705657bbca35ed6d8de4a4d809c"
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
+
 
 class ModelName(str, Enum):
     alexnet = "alexnet"
@@ -127,12 +130,15 @@ async def verify_key(x_key: str = Header()):
 
 fake_db = {}
 
+
 class Token(BaseModel):
-    access_token:str
-    token_type:str
+    access_token: str
+    token_type: str
+
 
 class TokenData(BaseModel):
-    username:str|None=None
+    username: str | None = None
+
 
 fake_users_db = {
     "johndoe": {
@@ -169,9 +175,23 @@ items = {
     "baz": {"name": "Baz", "description": None, "price": 50.2, "tax": 10.5, "tags": []},
 }
 
-app = FastAPI()
+origins = [
+    "http://localhost.tiangolo.com",
+    "https://localhost.tiangolo.com",
+    "http://localhost",
+    "http://localhost:8080",
+]
 
-pwd_context = CryptContext(schemes=['bcrypt'], deprecated="auto")
+app = FastAPI()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 # 전역에 dependency를 주입할 경우에는 app에서 처리해준다.
@@ -179,11 +199,14 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
 oauth2_jwt_scheme = OAuth2PasswordBearer(tokenUrl="token_access")
 
+
 def verify_password(plain_password, hashed_password):
     return pwd_context.verify(plain_password, hashed_password)
 
+
 def get_password_hash(password):
     return pwd_context.hash(password)
+
 
 def fake_decode_token(token):
     return User(username=token + "fakedecoded", email="john@example.com", full_name="John Doe")
@@ -219,7 +242,8 @@ async def get_current_user2(token: str = Depends(oauth2_scheme)):
         )
     return user
 
-async def get_current_user_with_jwt(token:str = Depends(oauth2_jwt_scheme)):
+
+async def get_current_user_with_jwt(token: str = Depends(oauth2_jwt_scheme)):
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
@@ -227,7 +251,7 @@ async def get_current_user_with_jwt(token:str = Depends(oauth2_jwt_scheme)):
     )
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        username:str = payload.get('sub')
+        username: str = payload.get("sub")
         if username is None:
             raise credentials_exception
         token_data = TokenData(username=username)
@@ -237,6 +261,7 @@ async def get_current_user_with_jwt(token:str = Depends(oauth2_jwt_scheme)):
     if user is None:
         raise credentials_exception
     return user
+
 
 async def get_current_active_user_with_jwt(current_user: User = Depends(get_current_user_with_jwt)):
     if current_user.disabled:
@@ -249,7 +274,8 @@ async def get_current_active_user(current_user: User = Depends(get_current_user2
         raise HTTPException(status_code=400, detail="Inactive user")
     return current_user
 
-def authenticate_user(fake_db, username:str, password:str):
+
+def authenticate_user(fake_db, username: str, password: str):
     user = get_user(fake_db, username)
     if not user:
         return False
@@ -257,15 +283,27 @@ def authenticate_user(fake_db, username:str, password:str):
         return False
     return user
 
-def create_access_token(data:dict, expires_delta:datetime.timedelta|None=None):
+
+def create_access_token(data: dict, expires_delta: datetime.timedelta | None = None):
     to_encode = data.copy()
     if expires_delta:
         expire = datetime.datetime.utcnow() + expires_delta
     else:
         expire = datetime.datetime.utcnow() + datetime.timedelta(minutes=15)
-    to_encode.update({'exp': expire})
+    to_encode.update({"exp": expire})
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, ALGORITHM)
     return encoded_jwt
+
+
+@app.middleware("http")
+async def add_process_time_header(request: Request, call_next):
+    # middleware를 사용하면 request를 먼저 미들웨어를 통과해 path operation으로 진행된다.
+    # 이를 통해 request - response 사이에 다른 작업을 처리하도록 할 수 있다.
+    start_time = time.time()
+    response = await call_next(request)
+    process_time = time.time() - start_time
+    response.headers["X-Process-Time"] = str(process_time)
+    return response
 
 
 @app.get("/")
@@ -389,9 +427,11 @@ async def read_user_me():
 async def read_users_me(current_user: User = Depends(get_current_active_user)):
     return current_user
 
-@app.get('/usersJwt/me', tags=["users"])
+
+@app.get("/usersJwt/me", tags=["users"])
 async def read_users_jwt_me(current_user: User = Depends(get_current_active_user_with_jwt)):
     return current_user
+
 
 @app.get("/models/{model_name}")
 async def get_mode(model_name: ModelName):
@@ -570,7 +610,8 @@ async def login_oauth(form_data: OAuth2PasswordRequestForm = Depends()):
         raise HTTPException(status_code=400, detail="Incorrect username or password")
     return {"access_token": user.username, "token_type": "bearer"}
 
-@app.post('/token_access', response_model=Token)
+
+@app.post("/token_access", response_model=Token)
 async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends()):
     user = authenticate_user(fake_users_db, form_data.username, form_data.password)
     if not user:
@@ -580,8 +621,8 @@ async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(
             headers={"WWW-Authenticate": "Bearer"},
         )
     access_token_exprires = datetime.timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    access_token = create_access_token(data={'sub': user.username}, expires_delta=access_token_exprires)
-    return {'access_token': access_token, 'token_type': 'bearer'}
+    access_token = create_access_token(data={"sub": user.username}, expires_delta=access_token_exprires)
+    return {"access_token": access_token, "token_type": "bearer"}
 
 
 class UnicornException(Exception):
