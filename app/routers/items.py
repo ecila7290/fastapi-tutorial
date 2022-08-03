@@ -1,9 +1,9 @@
 from fastapi import APIRouter, Depends, HTTPException
 
-from ..dependencies import get_token_header
+from dependencies import get_token_header
 
 router=APIRouter(
-  prefix='items', # prefix에는 마지막에 /가 들어가면 안된다.
+  prefix='/items', # prefix에는 마지막에 /가 들어가면 안된다.
   tags=['items'],
   dependencies=[Depends(get_token_header)], # path operation의 dependency이므로 함수에는 값이 전달되지 않는다.
   responses={404: {"description": "Not found"}},
