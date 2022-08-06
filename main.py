@@ -1,8 +1,9 @@
 import time
 import datetime
+import uvicorn
 from enum import Enum
 
-from fastapi import FastAPI, Query, Path, Body, Cookie, Header, Request, status, Form, HTTPException, Depends
+from fastapi import FastAPI, Query, Path, Body, Cookie, Header, Request, status, Form, HTTPException, Depends, BackgroundTasks
 from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -16,6 +17,21 @@ from passlib.context import CryptContext
 SECRET_KEY = "45e69d166863c63c834656551596b21e148a8705657bbca35ed6d8de4a4d809c"
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
+
+description = """
+ChimichangApp API helps you do awesome stuff. 🚀
+
+## Items
+
+You can **read items**.
+
+## Users
+
+You will be able to:
+
+* **Create users** (_not implemented_).
+* **Read users** (_not implemented_).
+"""
 
 
 class ModelName(str, Enum):
@@ -182,7 +198,44 @@ origins = [
     "http://localhost:8080",
 ]
 
-app = FastAPI()
+# swagger ui의 docs url도 수정이 가능하다.
+# 보이지 않게 하려면 docs_url=None을 주면 된다.
+docs_url = "/api/v1/docs"
+
+# 각 태그에 대한 metadata도 추가할 수 있다.
+tags_metadata = [
+    {
+        "name": "users",
+        "description": "Operations with users. The **login** logic is also here.",
+    },
+    {
+        "name": "items",
+        "description": "Manage items. So _fancy_ they have their own docs.",
+        "externalDocs": {
+            "description": "Items external docs",
+            "url": "https://fastapi.tiangolo.com/",
+        },
+    },
+]
+
+# API에 대한 metadata를 추가할 수 있다.
+app = FastAPI(
+    title="ChimichangApp",
+    description=description,
+    version="0.0.1",
+    terms_of_service="http://example.com/terms/",
+    contact={
+        "name": "Deadpoolio the Amazing",
+        "url": "http://x-force.example.com/contact/",
+        "email": "dp@x-force.example.com",
+    },
+    license_info={
+        "name": "Apache 2.0",
+        "url": "https://www.apache.org/licenses/LICENSE-2.0.html",
+    },
+    openapi_tags=tags_metadata,
+    docs_url=docs_url,
+)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
@@ -643,6 +696,72 @@ async def read_unicorn(name: str):
     return {"unicorn_name": name}
 
 
-@app.get("/")
-async def foo():
-    return
+def write_notification(email: str, message=""):
+    time.sleep(2)
+    with open("notification.txt", "w") as email_file:
+        content = f"notification for {email}: {message}"
+        email_file.write(content)
+
+
+def write_log(message: str):
+    time.sleep(4)
+    with open("log.txt", "a") as log:
+        log.write(message)
+
+
+def get_query(background_tasks: BackgroundTasks, q: str | None = None):
+    if q:
+        message = f"found query: {q}\n"
+        background_tasks.add_task(write_log, message)
+    return q
+
+
+@app.get("/send_notification/{email}")
+async def send_notification(email: str, background_tasks: BackgroundTasks, q: str = Depends(get_query)):
+    # BackgroundTasks를 사용해 간단한 background 작업을 수행할 수 있다.
+    # path operation에도 넣을 수 있는데, 함수 안에도 BackgroundTasks가 있으면
+    # path operation의 BackgroundTasks가 실행된 후 함수 안에 있는 BackgroundTasks가 실행되는 것으로 보인다.
+    background_tasks.add_task(write_notification, email, message="some notification")
+    return {"message": "Notification sent in the background"}
+
+
+fake_secret_token = "coneofsilence"
+
+fake_test_db = {
+    "foo": {"id": "foo", "title": "Foo", "description": "There goes my hero"},
+    "bar": {"id": "bar", "title": "Bar", "description": "The bartenders"},
+}
+
+
+class TestItem(BaseModel):
+    id: str
+    title: str
+    description: str | None = None
+
+
+@app.get("/test/items/{item_id}", response_model=TestItem, tags=["test"])
+async def read_main(item_id: str, x_token: str = Header()):
+    if x_token != fake_secret_token:
+        raise HTTPException(status_code=400, detail="Invalid X-Token header")
+    if item_id not in fake_test_db:
+        raise HTTPException(status_code=404, detail="Item not found")
+    return fake_test_db[item_id]
+
+
+@app.post("/test/items", response_model=TestItem, tags=["test"])
+async def create_main(item: TestItem, x_token: str = Header()):
+    if x_token != fake_secret_token:
+        raise HTTPException(status_code=400, detail="Invalid X-Token header")
+    if item.id in fake_test_db:
+        raise HTTPException(status_code=400, detail="Item already exists")
+    fake_test_db[item.id] = item
+    return item
+
+
+# @app.get("/")
+# async def foo():
+#     return
+
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=8000)
